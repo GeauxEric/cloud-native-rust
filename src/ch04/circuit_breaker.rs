@@ -1,27 +1,29 @@
+use std::sync::Arc;
+use std::sync::Mutex;
+
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum Error {
     UnReachable,
     CircuitError,
 }
 
+pub(crate) type Circuit = Arc<Mutex<dyn Fn() -> Result<String, Error> + Send + 'static>>;
 
-pub(crate) type Circuit = dyn Fn() -> Result<String, Error>;
-
-pub(crate) fn fail_after(threshold: usize) -> Box<Circuit> {
-    let cnt = std::cell::RefCell::new(0);
+pub(crate) fn fail_after(threshold: usize) -> Circuit {
+    let cnt = Arc::new(Mutex::new(0));
     let f = move || {
-        let mut c = cnt.borrow_mut();
+        let mut c = cnt.lock().unwrap();
         *c += 1;
         if *c > threshold {
-            return Err(Error::CircuitError);
+            Err(Error::CircuitError)
         } else {
-            return Ok("ok".to_owned());
+            Ok("ok".to_owned())
         }
     };
-    Box::new(f)
+    Arc::new(Mutex::new(f))
 }
 
-fn breaker(circuit: Box<Circuit>, failure_threshold: u64) -> Box<Circuit> {
+fn breaker(circuit: Circuit, failure_threshold: u64) -> Circuit {
     let failures = std::cell::RefCell::new(0isize);
 
     let f = move || {
@@ -30,7 +32,8 @@ fn breaker(circuit: Box<Circuit>, failure_threshold: u64) -> Box<Circuit> {
             return Err(Error::UnReachable);
         }
 
-        let r: Result<String, Error> = circuit();
+        let c = circuit.lock().unwrap();
+        let r: Result<String, Error> = c();
         return match r {
             Ok(s) => {
                 let mut f = failures.borrow_mut();
@@ -44,7 +47,7 @@ fn breaker(circuit: Box<Circuit>, failure_threshold: u64) -> Box<Circuit> {
             }
         };
     };
-    return Box::new(f);
+    Arc::new(Mutex::new(f))
 }
 
 #[cfg(test)]
@@ -55,7 +58,7 @@ mod tests {
     fn test_fail_after() {
         let f = fail_after(5);
         for i in 0..6 {
-            let r: Result<String, Error> = f();
+            let r: Result<String, Error> = f.lock().unwrap()();
             if i < 5 {
                 assert!(r.is_ok())
             } else {
@@ -69,7 +72,7 @@ mod tests {
         let c = fail_after(5);
         let b = breaker(c, 1);
         for i in 0..9 {
-            let r: Result<String, Error> = b();
+            let r: Result<String, Error> = b.lock().unwrap()();
             if i < 5 {
                 assert!(r.is_ok())
             } else if i == 5 {
